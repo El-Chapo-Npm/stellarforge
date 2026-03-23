@@ -119,11 +119,7 @@ cargo test -p forge-oracle
 
 ## Contributing
 
-PRs welcome. Please ensure:
-- `cargo fmt --all` passes
-- `cargo clippy --all-targets -- -D warnings` passes
-- `cargo test --workspace` passes
-- New functions have `///` doc comments
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions, code style requirements, and the pull request process.
 
 ---
 
