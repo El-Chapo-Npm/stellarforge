@@ -172,6 +172,49 @@ Understanding these key terms will help you work with StellarForge contracts mor
 
 ---
 
+## 📦 Versioning
+
+StellarForge contracts follow [Semantic Versioning](https://semver.org/) (SemVer) to help you manage upgrades safely.
+
+### Version Format: MAJOR.MINOR.PATCH
+
+- **MAJOR** — Breaking changes that require action from developers
+- **MINOR** — New features that are backward-compatible
+- **PATCH** — Bug fixes and internal improvements
+
+### What Counts as a Breaking Change?
+
+Breaking changes require a MAJOR version bump and include:
+
+- **Interface Changes** — Modifying function signatures, parameter types, or return values
+- **Storage Layout Changes** — Altering contract storage structure in ways that break existing deployments
+- **Behavior Changes** — Changing core logic that affects expected outcomes (e.g., calculation methods, state transitions)
+- **Error Changes** — Removing or renaming error types that external code may depend on
+- **Event Changes** — Modifying event structures or removing events that indexers rely on
+
+### Non-Breaking Changes
+
+These are safe and result in MINOR or PATCH bumps:
+
+- Adding new optional functions
+- Adding new events (without modifying existing ones)
+- Internal optimizations that don't affect external behavior
+- Bug fixes that restore intended behavior
+- Documentation improvements
+
+### Upgrade Recommendations
+
+- **Review the [CHANGELOG.md](CHANGELOG.md)** before upgrading to understand what changed
+- **Test thoroughly** on testnet before deploying MAJOR version upgrades to production
+- **Pin versions** in your deployment scripts to avoid unexpected changes
+- **Subscribe to releases** on GitHub to stay informed about security patches
+
+### Contract Independence
+
+Each contract in StellarForge is versioned independently. A breaking change in `forge-vesting` does not affect `forge-stream` versions.
+
+---
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions, code style requirements, and the pull request process.
