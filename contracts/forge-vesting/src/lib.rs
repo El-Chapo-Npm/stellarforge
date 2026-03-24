@@ -736,6 +736,22 @@ mod tests {
         let result = client.try_transfer_admin(&admin);
         assert_eq!(result, Err(Ok(VestingError::SameAdmin)));
     }
+
+    fn setup_with_token() -> (Env, Address, Address, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ForgeVesting);
+        let token_admin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+        let beneficiary = Address::generate(&env);
+        let admin = Address::generate(&env);
+        {
+            soroban_sdk::token::StellarAssetClient::new(&env, &token_id).mint(&contract_id, &1_000_000);
+        }
+        (env, contract_id, token_id, beneficiary, admin)
+    }
+
+}
 }
 }
 }
