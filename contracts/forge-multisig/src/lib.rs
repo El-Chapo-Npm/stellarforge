@@ -451,6 +451,31 @@ impl MultisigContract {
             .unwrap_or(0)
     }
 
+    /// Check if an address is one of the multisig owners.
+    ///
+    /// Read-only; returns `false` if the contract has not been initialized.
+    /// This is a lightweight alternative to [`get_owners`](Self::get_owners) when
+    /// UIs or integrators only need to verify ownership status.
+    ///
+    /// # Parameters
+    /// - `address` — The address to check for ownership.
+    ///
+    /// # Returns
+    /// `true` if `address` is in the owner list, `false` otherwise.
+    ///
+    /// # Example
+    /// ```text
+    /// if client.is_owner(&some_address) {
+    ///     // enable multisig actions
+    /// }
+    /// ```
+    pub fn is_owner(env: Env, address: Address) -> bool {
+        let owners: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Owners)
+            .unwrap_or(Vec::new(&env));
+        owners.contains(&address)
     /// Return the number of owner approvals for a proposal.
     ///
     /// Lightweight read-only view intended for UIs that only need approval count.
@@ -521,6 +546,7 @@ mod tests {
     fn test_initialize_with_duplicate_owners() {
         let env = Env::default();
         env.mock_all_auths();
+        env.register_contract(None, MultisigContract);
         let contract_id = env.register_contract(None, MultisigContract);
         let client = MultisigContractClient::new(&env, &contract_id);
         let mid = env.register_contract(None, MultisigContract);
@@ -708,6 +734,22 @@ mod tests {
     }
 
     #[test]
+    fn test_is_owner_returns_true_for_owner() {
+        let env = Env::default();
+        let (client, o1, _, _) = setup_2of3(&env);
+
+        assert!(client.is_owner(&o1));
+    }
+
+    #[test]
+    fn test_is_owner_returns_false_for_non_owner() {
+        let env = Env::default();
+        let (client, _, _, _) = setup_2of3(&env);
+        let non_owner = Address::generate(&env);
+
+        assert!(!client.is_owner(&non_owner));
+    }
+}
     fn test_get_owners_list() {
         let env = Env::default();
         let (client, o1, o2, o3) = setup_2of3(&env);
