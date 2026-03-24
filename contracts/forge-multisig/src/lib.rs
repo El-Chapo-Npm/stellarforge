@@ -548,11 +548,8 @@ mod tests {
     fn test_initialize_with_duplicate_owners() {
         let env = Env::default();
         env.mock_all_auths();
-        env.register_contract(None, MultisigContract);
         let contract_id = env.register_contract(None, MultisigContract);
         let client = MultisigContractClient::new(&env, &contract_id);
-        let mid = env.register_contract(None, MultisigContract);
-        let client = MultisigContractClient::new(&env, &mid);
         let o1 = Address::generate(&env);
         let owners = vec![&env, o1.clone(), o1.clone(), o1.clone()]; // 3 duplicates
         client.initialize(&owners, &1, &0);
@@ -687,6 +684,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
         let (client, _, _, _) = setup_2of3(&env);
+        let contract_id = env.register_contract(None, MultisigContract);
+        let client = MultisigContractClient::new(&env, &contract_id);
 
         assert_eq!(client.get_approval_count(&999), 0);
     }
@@ -723,17 +722,86 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 0);
+
+        let contract_id = env.register_contract(None, MultisigContract);
+        let client = MultisigContractClient::new(&env, &contract_id);
+        let o1 = Address::generate(&env);
+        let o2 = Address::generate(&env);
+        let o3 = Address::generate(&env);
+        let o4 = Address::generate(&env);
+
+        // 3-of-4 multisig
+        client.initialize(
+            &vec![&env, o1.clone(), o2.clone(), o3.clone(), o4.clone()],
+            &3,
+            &3600,
+        );
+
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let to = Address::generate(&env);
+        soroban_sdk::token::StellarAssetClient::new(&env, &token_id).mint(&contract_id, &500);
+
+        // o1 proposes (auto-approval)
+        let pid = client.propose(&o1, &to, &token_id, &500);
+
+        // o2 and o3 reject - proposal is now rejected (2 rejections means only 2 owners left who could approve)
+        client.reject(&o2, &pid);
+        client.reject(&o3, &pid);
+
+        // Verify proposal has 2 rejections
+        let proposal = client.get_proposal(&pid).unwrap();
+        assert_eq!(proposal.rejections.len(), 2);
+        assert_eq!(proposal.approvals.len(), 1); // only proposer
+
+        // Even if o4 approves, bringing total approvals to 2, it should not be executable
+        // because 2 rejections means threshold of 3 can never be reached
+        client.approve(&o4, &pid);
+
+        let proposal = client.get_proposal(&pid).unwrap();
+        assert_eq!(proposal.approvals.len(), 2);
+
+        // Advance time past timelock
+        env.ledger().with_mut(|l| l.timestamp = 7200);
+
+        // Execution should fail because proposal is effectively rejected
+        let result = client.try_execute(&o1, &pid);
+        assert_eq!(result, Err(Ok(MultisigError::InsufficientApprovals)));
+
+        // Verify proposal state remains unchanged
+        let proposal = client.get_proposal(&pid).unwrap();
+        assert!(!proposal.executed);
+        assert_eq!(proposal.rejections.len(), 2);
+    }
+
+    #[test]
+    fn test_rejected_proposal_state_immutable() {
+        let env = Env::default();
+        env.mock_all_auths();
+
         let (client, o1, o2, o3) = setup_2of3(&env);
         let token = Address::generate(&env);
         let to = Address::generate(&env);
 
+        // o1 proposes (auto-approval)
         let pid = client.propose(&o1, &to, &token, &500);
+
+        // o2 and o3 reject - proposal is now rejected (2 rejections in 2-of-3 means impossible to reach threshold)
         client.reject(&o2, &pid);
         client.reject(&o3, &pid);
 
-        env.ledger().with_mut(|l| l.timestamp = 7200);
-        let result = client.try_execute(&o3, &pid);
-        assert_eq!(result, Err(Ok(MultisigError::InsufficientApprovals)));
+        // Verify rejection state
+        let proposal = client.get_proposal(&pid).unwrap();
+        assert_eq!(proposal.rejections.len(), 2);
+        assert_eq!(proposal.approvals.len(), 1);
+        assert!(proposal.approved_at.is_none()); // Never reached approval threshold
+
+        // Proposal should remain in rejected state
+        let proposal_after = client.get_proposal(&pid).unwrap();
+        assert_eq!(proposal_after.rejections.len(), 2);
+        assert!(!proposal_after.executed);
     }
 
     #[test]
