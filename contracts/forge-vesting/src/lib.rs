@@ -1413,4 +1413,118 @@ mod tests {
         assert_eq!(client.try_claim(), Err(Ok(VestingError::NothingToClaim)));
     }
 
+    // ── Event emission tests ──────────────────────────────────────────────────
+
+    /// Verifies initialize() emits a "vesting_initialized" event whose data
+    /// payload is exactly (total_amount, cliff_seconds, duration_seconds).
+    #[test]
+    fn test_event_vesting_initialized() {
+        use soroban_sdk::{testutils::Events, Symbol, TryFromVal};
+
+        let (env, contract_id, token, beneficiary, admin) = setup();
+        let client = ForgeVestingClient::new(&env, &contract_id);
+
+        let total: i128 = 5_000_000;
+        let cliff: u64 = 200;
+        let duration: u64 = 2000;
+        client.initialize(&token, &beneficiary, &admin, &total, &cliff, &duration);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+
+        let (_, topics, data) = events.get(0).unwrap();
+
+        // Topic must be the symbol "vesting_initialized"
+        assert_eq!(topics.len(), 1);
+        let topic_sym = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+        assert_eq!(topic_sym, Symbol::new(&env, "vesting_initialized"));
+
+        // Decode data as (i128, u64, u64) and compare field by field
+        let (got_total, got_cliff, got_duration) =
+            <(i128, u64, u64)>::try_from_val(&env, &data).unwrap();
+        assert_eq!(got_total, total);
+        assert_eq!(got_cliff, cliff);
+        assert_eq!(got_duration, duration);
+    }
+
+    /// Verifies claim() emits a "claimed" event whose data payload is
+    /// exactly (beneficiary, amount_claimed).
+    #[test]
+    fn test_event_claimed() {
+        use soroban_sdk::{testutils::Events, Symbol, TryFromVal};
+
+        let (env, contract_id, token_id, beneficiary, admin) = setup_with_token();
+        let client = ForgeVestingClient::new(&env, &contract_id);
+
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        client.initialize(&token_id, &beneficiary, &admin, &1_000_000, &0, &1000);
+
+        // Advance to 50% vested and claim
+        env.ledger().with_mut(|l| l.timestamp = 500);
+        let claimed_amount = client.claim();
+
+        // Find the "claimed" event among all emitted events
+        let events = env.events().all();
+        let (_, topics, data) = events
+            .iter()
+            .find(|(_, topics, _)| {
+                topics.len() == 1
+                    && Symbol::try_from_val(&env, &topics.get(0).unwrap())
+                        .map(|s| s == Symbol::new(&env, "claimed"))
+                        .unwrap_or(false)
+            })
+            .expect("claimed event not found");
+
+        assert_eq!(topics.len(), 1);
+        let topic_sym = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+        assert_eq!(topic_sym, Symbol::new(&env, "claimed"));
+
+        // Decode data as (Address, i128)
+        let (got_beneficiary, got_amount) =
+            <(Address, i128)>::try_from_val(&env, &data).unwrap();
+        assert_eq!(got_beneficiary, beneficiary);
+        assert_eq!(got_amount, claimed_amount);
+    }
+
+    /// Verifies cancel() emits a "vesting_cancelled" event whose data payload is
+    /// exactly (admin, to_admin, beneficiary, to_beneficiary).
+    #[test]
+    fn test_event_vesting_cancelled() {
+        use soroban_sdk::{testutils::Events, Symbol, TryFromVal};
+
+        let (env, contract_id, token_id, beneficiary, admin) = setup_with_token();
+        let client = ForgeVestingClient::new(&env, &contract_id);
+
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        client.initialize(&token_id, &beneficiary, &admin, &1_000_000, &0, &1000);
+
+        // Advance to 40% vested, then cancel (no prior claim)
+        // 40% vested → 400_000 to beneficiary, 600_000 to admin
+        env.ledger().with_mut(|l| l.timestamp = 400);
+        client.cancel();
+
+        let events = env.events().all();
+        let (_, topics, data) = events
+            .iter()
+            .find(|(_, topics, _)| {
+                topics.len() == 1
+                    && Symbol::try_from_val(&env, &topics.get(0).unwrap())
+                        .map(|s| s == Symbol::new(&env, "vesting_cancelled"))
+                        .unwrap_or(false)
+            })
+            .expect("vesting_cancelled event not found");
+
+        assert_eq!(topics.len(), 1);
+        let topic_sym = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+        assert_eq!(topic_sym, Symbol::new(&env, "vesting_cancelled"));
+
+        // Decode data as (Address, i128, Address, i128)
+        let (got_admin, got_to_admin, got_beneficiary, got_to_beneficiary) =
+            <(Address, i128, Address, i128)>::try_from_val(&env, &data).unwrap();
+        assert_eq!(got_admin, admin);
+        assert_eq!(got_to_admin, 600_000);
+        assert_eq!(got_beneficiary, beneficiary);
+        assert_eq!(got_to_beneficiary, 400_000);
+    }
+
 }
