@@ -737,6 +737,41 @@ mod tests {
     }
 
     #[test]
+    fn test_approve_after_execute_reverts_with_already_executed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 0);
+
+        let contract_id = env.register_contract(None, MultisigContract);
+        let client = MultisigContractClient::new(&env, &contract_id);
+        let o1 = Address::generate(&env);
+        let o2 = Address::generate(&env);
+        let o3 = Address::generate(&env);
+        client.initialize(&vec![&env, o1.clone(), o2.clone(), o3.clone()], &2, &3600);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let to = Address::generate(&env);
+        soroban_sdk::token::StellarAssetClient::new(&env, &token_id).mint(&contract_id, &500);
+
+        let pid = client.propose(&o1, &to, &token_id, &500);
+        client.approve(&o2, &pid);
+
+        env.ledger().with_mut(|l| l.timestamp = 7200);
+        client.execute(&o3, &pid);
+
+        // Try to approve with o3 (who hasn't voted yet) after execution
+        let result = client.try_approve(&o3, &pid);
+        assert_eq!(result, Err(Ok(MultisigError::AlreadyExecuted)));
+
+        // Also test reject() on executed proposal
+        let result = client.try_reject(&o3, &pid);
+        assert_eq!(result, Err(Ok(MultisigError::AlreadyExecuted)));
+    }
+
+    #[test]
     fn test_get_approval_count_zero() {
         let env = Env::default();
         env.mock_all_auths();
