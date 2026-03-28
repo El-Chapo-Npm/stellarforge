@@ -63,6 +63,7 @@ pub enum OracleError {
     PriceNotFound = 4,
     PriceStale = 5,
     InvalidPrice = 6,
+    InvalidPair = 7,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -106,7 +107,10 @@ impl ForgeOracle {
     /// - `quote`: The quote asset symbol (e.g., USDC).
     /// - `price`: The price value scaled to 7 decimal places.
     ///
-    /// Returns `Ok(())` on successful submission, or an `OracleError` if unauthorized or invalid price.
+    /// Returns `Ok(())` on successful submission, or an `OracleError` if:
+    /// - Unauthorized (admin auth required)
+    /// - `price` <= 0 ([`OracleError::InvalidPrice`])
+    /// - `base == quote` ([`OracleError::InvalidPair`])
     ///
     /// ```
     /// client.submit_price(&Symbol::new(&env, "XLM"), &Symbol::new(&env, "USDC"), &10000000);
@@ -117,6 +121,10 @@ impl ForgeOracle {
         quote: Symbol,
         price: i128,
     ) -> Result<(), OracleError> {
+        if base == quote {
+            return Err(OracleError::InvalidPair);
+        }
+
         let admin: Address = env
             .storage()
             .instance()
@@ -560,6 +568,18 @@ mod tests {
         let quote = Symbol::new(&env, "USDC");
         let result = client.try_submit_price(&base, &quote, &0);
         assert_eq!(result, Err(Ok(OracleError::InvalidPrice)));
+    }
+
+    #[test]
+    fn test_submit_price_self_referential_pair_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, client) = setup(&env);
+
+        let base = Symbol::new(&env, "XLM");
+        let quote = Symbol::new(&env, "XLM");
+        let result = client.try_submit_price(&base, &quote, &10_000_000);
+        assert_eq!(result, Err(Ok(OracleError::InvalidPair)));
     }
 
     #[test]

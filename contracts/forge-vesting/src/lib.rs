@@ -100,6 +100,7 @@ pub enum VestingError {
     BeneficiaryAsAdmin = 12,
     Paused = 9,
     NotPaused = 10,
+    VestingComplete = 13,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -290,6 +291,12 @@ impl ForgeVesting {
         }
 
         let now = env.ledger().timestamp();
+        let elapsed = now.saturating_sub(config.start_time);
+
+        if elapsed >= config.duration_seconds {
+            return Err(VestingError::VestingComplete);
+        }
+
         let vested = Self::compute_vested(&config, now);
         let claimed = Self::get_claimed(&env);
 
@@ -720,6 +727,69 @@ mod tests {
         let client = ForgeVestingClient::new(&env, &contract_id);
         let result = client.try_initialize(&token, &beneficiary, &admin, &1_000_000, &100, &1000);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_cancel_after_full_vesting_fails() {
+        let (env, contract_id, token, beneficiary, admin) = setup();
+        let client = ForgeVestingClient::new(&env, &contract_id);
+        client.initialize(&token, &beneficiary, &admin, &1_000_000, &100, &1000);
+
+        // Advance past duration
+        env.ledger().with_mut(|l| l.timestamp += 1001);
+        let result = client.try_cancel();
+        assert_eq!(result, Err(Ok(VestingError::VestingComplete)));
+    }
+
+    #[test]
+    fn test_claim_after_failed_cancel_succeeds() {
+        let (env, contract_id, token, beneficiary, admin) = setup();
+        let client = ForgeVestingClient::new(&env, &contract_id);
+        client.initialize(&token, &beneficiary, &admin, &1_000_000, &100, &1000);
+
+        // Mock token transfer for claim
+        env.mock_all_auths();
+
+        // Advance to full vesting
+        env.ledger().with_mut(|l| l.timestamp += 1000);
+
+        // Cancel fails
+        let cancel_result = client.try_cancel();
+        assert_eq!(cancel_result, Err(Ok(VestingError::VestingComplete)));
+
+        // Beneficiary can still claim
+        let claim_result = client.try_claim();
+        assert!(claim_result.is_ok());
+        assert_eq!(claim_result.unwrap(), Ok(1_000_000));
+    }
+
+    #[test]
+    fn test_compute_vested_dust_verification() {
+        let (env, contract_id, token, beneficiary, admin) = setup();
+        let client = ForgeVestingClient::new(&env, &contract_id);
+        client.initialize(&token, &beneficiary, &admin, &1000, &0, &3);
+
+        env.mock_all_auths();
+
+        // Start at t=0
+        let start_ts = env.ledger().timestamp();
+
+        // t=1
+        env.ledger().with_mut(|l| l.timestamp = start_ts + 1);
+        let v1 = client.claim().unwrap();
+        assert_eq!(v1, 333); // (1000 * 1) / 3 = 333
+
+        // t=2
+        env.ledger().with_mut(|l| l.timestamp = start_ts + 2);
+        let v2 = client.claim().unwrap();
+        assert_eq!(v2, 333); // (1000 * 2) / 3 - 333 = 666 - 333 = 333
+
+        // t=3
+        env.ledger().with_mut(|l| l.timestamp = start_ts + 3);
+        let v3 = client.claim().unwrap();
+        assert_eq!(v3, 334); // 1000 - 666 = 334
+
+        assert_eq!(v1 + v2 + v3, 1000);
     }
 
     #[test]

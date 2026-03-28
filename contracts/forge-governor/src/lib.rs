@@ -247,7 +247,7 @@ impl GovernorContract {
     /// - `voter` — Address casting the vote.
     /// - `proposal_id` — ID of the proposal to vote on.
     /// - `support` — `true` to vote in favor, `false` to vote against.
-    /// - `weight` — Voting power to apply, typically the voter's token balance.
+    /// - `weight` — Voting power to apply, must be <= the voter's actual token balance.
     ///
     /// # Returns
     /// `Ok(())` on success.
@@ -293,6 +293,19 @@ impl GovernorContract {
         }
 
         if weight <= 0 {
+            return Err(GovernorError::InvalidWeight);
+        }
+
+        let config: GovernorConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(GovernorError::NotInitialized)?;
+
+        let token_client = token::Client::new(&env, &config.vote_token);
+        let actual_balance = token_client.balance(&voter);
+
+        if weight > actual_balance {
             return Err(GovernorError::InvalidWeight);
         }
 
@@ -765,7 +778,8 @@ mod tests {
     fn setup(env: &Env) -> GovernorContractClient<'_> {
         let contract_id = env.register_contract(None, GovernorContract);
         let client = GovernorContractClient::new(env, &contract_id);
-        let token = Address::generate(env);
+        let token_admin = Address::generate(env);
+        let token = env.register_stellar_asset_contract(token_admin);
         let config = GovernorConfig {
             vote_token: token,
             voting_period: 3600,
@@ -791,11 +805,40 @@ mod tests {
             &String::from_str(&env, "Test Proposal"),
             &String::from_str(&env, "A test"),
         );
+        
+        let config = client.get_config().unwrap();
+        let token_client = token::Client::new(&env, &config.vote_token);
+        token_client.transfer(&token_client.address, &voter, &500);
+
         client.vote(&voter, &pid, &true, &200);
 
         env.ledger().with_mut(|l| l.timestamp = 5000);
         let state = client.finalize(&pid);
         assert_eq!(state, ProposalState::Passed);
+    }
+
+    #[test]
+    fn test_vote_with_excessive_weight_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let client = setup(&env);
+
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+
+        let pid = client.propose(
+            &proposer,
+            &String::from_str(&env, "Test Proposal"),
+            &String::from_str(&env, "A test"),
+        );
+
+        let config = client.get_config().unwrap();
+        let token_client = token::Client::new(&env, &config.vote_token);
+        token_client.transfer(&token_client.address, &voter, &100);
+
+        // Try to vote with 200 weight when only 100 balance
+        let result = client.try_vote(&voter, &pid, &true, &200);
+        assert_eq!(result, Err(Ok(GovernorError::InvalidWeight)));
     }
 
     #[test]
