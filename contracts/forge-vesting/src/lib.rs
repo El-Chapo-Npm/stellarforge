@@ -462,6 +462,7 @@ impl ForgeVesting {
     ///
     /// # Errors
     /// - [`VestingError::NotInitialized`] — `initialize` has not been called.
+    /// - [`VestingError::Cancelled`] — The vesting schedule has been cancelled.
     /// - [`VestingError::SameBeneficiary`] — `new_beneficiary` is the same as the current beneficiary.
     ///
     /// # Example
@@ -477,6 +478,10 @@ impl ForgeVesting {
             .ok_or(VestingError::NotInitialized)?;
 
         config.beneficiary.require_auth();
+
+        if config.cancelled {
+            return Err(VestingError::Cancelled);
+        }
 
         if config.beneficiary == new_beneficiary {
             return Err(VestingError::SameBeneficiary);
@@ -1196,6 +1201,17 @@ mod tests {
         let new_beneficiary = Address::generate(&env);
         let result = client.try_change_beneficiary(&new_beneficiary);
         assert_eq!(result, Err(Ok(VestingError::NotInitialized)));
+    }
+
+    #[test]
+    fn test_change_beneficiary_cancelled_fails() {
+        let (env, contract_id, token, beneficiary, admin) = setup();
+        let client = ForgeVestingClient::new(&env, &contract_id);
+        client.initialize(&token, &beneficiary, &admin, &1_000_000, &100, &1000);
+        client.cancel();
+        let new_beneficiary = Address::generate(&env);
+        let result = client.try_change_beneficiary(&new_beneficiary);
+        assert_eq!(result, Err(Ok(VestingError::Cancelled)));
     }
 
     /// Verifies the fully vested state end-to-end:
