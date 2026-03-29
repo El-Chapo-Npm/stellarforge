@@ -54,6 +54,15 @@ pub enum ProposalState {
     Cancelled,
 }
 
+/// Direction of a vote cast on a proposal.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum VoteDirection {
+    For,
+    Against,
+    Abstain,
+}
+
 /// Vote tally for a proposal.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -62,7 +71,9 @@ pub struct VoteTally {
     pub yes_votes: i128,
     /// Total votes cast against.
     pub no_votes: i128,
-    /// Sum of yes and no votes.
+    /// Total abstain votes.
+    pub abstain_votes: i128,
+    /// Sum of yes, no, and abstain votes.
     pub total_votes: i128,
 }
 
@@ -84,6 +95,8 @@ pub struct Proposal {
     pub votes_for: i128,
     /// Total votes against.
     pub votes_against: i128,
+    /// Total abstain votes.
+    pub abstentions: i128,
     /// Timestamp when proposal passed (for timelock).
     pub passed_at: Option<u64>,
     /// Current state.
@@ -221,6 +234,7 @@ impl GovernorContract {
             vote_end: now + config.voting_period,
             votes_for: 0,
             votes_against: 0,
+            abstentions: 0,
             passed_at: None,
             state: ProposalState::Active,
         };
@@ -254,6 +268,8 @@ impl GovernorContract {
 
     /// Cast a vote on an active proposal.
     ///
+    /// Adds `weight` to `votes_for`, `votes_against`, or `abstentions` depending on
+    /// `direction`. Each address may only vote once per proposal.
     /// Adds `weight` to either `votes_for` or `votes_against` depending on
     /// `support`. Each address may only vote once per proposal.
     ///
@@ -268,7 +284,7 @@ impl GovernorContract {
     /// # Parameters
     /// - `voter` — Address casting the vote.
     /// - `proposal_id` — ID of the proposal to vote on.
-    /// - `support` — `true` to vote in favor, `false` to vote against.
+    /// - `direction` — [`VoteDirection::For`], [`VoteDirection::Against`], or [`VoteDirection::Abstain`].
     /// - `weight` — Voting power to apply, must be <= the voter's actual token balance.
     ///
     /// # Returns
@@ -284,6 +300,10 @@ impl GovernorContract {
     ///
     /// # Example
     /// ```text
+    /// // Vote in favor with 500 tokens of weight
+    /// client.vote(&voter, &proposal_id, &VoteDirection::For, &500);
+    /// // Abstain with 200 tokens of weight (counts toward quorum)
+    /// client.vote(&voter, &proposal_id, &VoteDirection::Abstain, &200);
     /// // Vote in favor with weight equal to the voter's token balance
     /// let balance = token_client.balance(&voter);
     /// client.vote(&voter, &proposal_id, &true, &balance);
@@ -292,7 +312,7 @@ impl GovernorContract {
         env: Env,
         voter: Address,
         proposal_id: u64,
-        support: bool,
+        direction: VoteDirection,
         weight: i128,
     ) -> Result<(), GovernorError> {
         voter.require_auth();
@@ -346,10 +366,10 @@ impl GovernorContract {
             return Err(GovernorError::InvalidWeight);
         }
 
-        if support {
-            proposal.votes_for += weight;
-        } else {
-            proposal.votes_against += weight;
+        match direction {
+            VoteDirection::For => proposal.votes_for += weight,
+            VoteDirection::Against => proposal.votes_against += weight,
+            VoteDirection::Abstain => proposal.abstentions += weight,
         }
 
         env.storage().persistent().set(&vote_key, &true);
@@ -360,7 +380,7 @@ impl GovernorContract {
 
         env.events().publish(
             (Symbol::new(&env, "vote_cast"),),
-            (proposal_id, &voter, support, weight),
+            (proposal_id, &voter, direction, weight),
         );
 
         Ok(())
@@ -412,7 +432,7 @@ impl GovernorContract {
             .instance()
             .get(&DataKey::Config)
             .ok_or(GovernorError::NotInitialized)?;
-        let total_votes = proposal.votes_for + proposal.votes_against;
+        let total_votes = proposal.votes_for + proposal.votes_against + proposal.abstentions;
 
         if total_votes >= config.quorum && proposal.votes_for > proposal.votes_against {
             proposal.state = ProposalState::Passed;
@@ -695,7 +715,7 @@ impl GovernorContract {
     /// # Example
     /// ```text
     /// if !client.has_voted(&proposal_id, &voter) {
-    ///     client.vote(&voter, &proposal_id, &true, &100);
+    ///     client.vote(&voter, &proposal_id, &VoteDirection::For, &100);
     /// }
     /// ```
     pub fn has_voted(env: Env, proposal_id: u64, voter: Address) -> bool {
@@ -761,7 +781,8 @@ impl GovernorContract {
         Ok(VoteTally {
             yes_votes: proposal.votes_for,
             no_votes: proposal.votes_against,
-            total_votes: proposal.votes_for + proposal.votes_against,
+            abstain_votes: proposal.abstentions,
+            total_votes: proposal.votes_for + proposal.votes_against + proposal.abstentions,
         })
     }
 
@@ -944,7 +965,7 @@ mod tests {
         let token_client = token::Client::new(&env, &config.vote_token);
         token_client.transfer(&token_client.address, &voter, &500);
 
-        client.vote(&voter, &pid, &true, &200);
+        client.vote(&voter, &pid, &VoteDirection::For, &200);
 
         env.ledger().with_mut(|l| l.timestamp = 5000);
         let state = client.finalize(&pid);
@@ -971,7 +992,7 @@ mod tests {
         token_client.transfer(&token_client.address, &voter, &100);
 
         // Try to vote with 200 weight when only 100 balance
-        let result = client.try_vote(&voter, &pid, &true, &200);
+        let result = client.try_vote(&voter, &pid, &VoteDirection::For, &200);
         assert_eq!(result, Err(Ok(GovernorError::InvalidWeight)));
     }
 
@@ -1029,6 +1050,7 @@ mod tests {
         );
 
         let voter = Address::generate(&env);
+        client.vote(&voter, &pid, &VoteDirection::For, &50);
         mint(&env, &token_id, &voter, 50);
         client.vote(&voter, &pid, &true, &50);
 
@@ -1053,8 +1075,8 @@ mod tests {
             &String::from_str(&env, "D"),
         );
 
-        client.vote(&voter, &pid, &true, &100);
-        let result = client.try_vote(&voter, &pid, &true, &100);
+        client.vote(&voter, &pid, &VoteDirection::For, &100);
+        let result = client.try_vote(&voter, &pid, &VoteDirection::For, &100);
         assert_eq!(result, Err(Ok(GovernorError::AlreadyVoted)));
     }
 
@@ -1073,7 +1095,7 @@ mod tests {
             &String::from_str(&env, "D"),
         );
 
-        let result = client.try_vote(&voter, &pid, &true, &0);
+        let result = client.try_vote(&voter, &pid, &VoteDirection::For, &0);
         assert_eq!(result, Err(Ok(GovernorError::InvalidWeight)));
     }
 
@@ -1092,7 +1114,7 @@ mod tests {
             &String::from_str(&env, "D"),
         );
 
-        let result = client.try_vote(&voter, &pid, &false, &-1000);
+        let result = client.try_vote(&voter, &pid, &VoteDirection::Against, &-1000);
         assert_eq!(result, Err(Ok(GovernorError::InvalidWeight)));
     }
 
@@ -1144,6 +1166,7 @@ mod tests {
 
         // Vote with weight below quorum (quorum = 100)
         let voter = Address::generate(&env);
+        client.vote(&voter, &pid, &VoteDirection::For, &50);
         mint(&env, &token_id, &voter, 50);
         client.vote(&voter, &pid, &true, &50);
 
@@ -1169,6 +1192,8 @@ mod tests {
         // Cast votes that exactly meet quorum (60 + 40 = 100)
         let voter1 = Address::generate(&env);
         let voter2 = Address::generate(&env);
+        client.vote(&voter1, &pid, &VoteDirection::For, &60);
+        client.vote(&voter2, &pid, &VoteDirection::For, &40);
         mint(&env, &token_id, &voter1, 60);
         mint(&env, &token_id, &voter2, 40);
         client.vote(&voter1, &pid, &true, &60);
@@ -1189,6 +1214,8 @@ mod tests {
         // Cast votes just below quorum (60 + 39 = 99)
         let voter3 = Address::generate(&env);
         let voter4 = Address::generate(&env);
+        client.vote(&voter3, &pid2, &VoteDirection::For, &60);
+        client.vote(&voter4, &pid2, &VoteDirection::For, &39);
         mint(&env, &token_id, &voter3, 60);
         mint(&env, &token_id, &voter4, 39);
         client.vote(&voter3, &pid2, &true, &60);
@@ -1216,6 +1243,7 @@ mod tests {
         );
 
         let voter = Address::generate(&env);
+        client.vote(&voter, &pid, &VoteDirection::For, &100);
         mint(&env, &token_id, &voter, 100);
         client.vote(&voter, &pid, &true, &100);
 
@@ -1264,6 +1292,7 @@ mod tests {
         env.ledger().with_mut(|l| l.timestamp = 5000);
 
         let voter = Address::generate(&env);
+        let result = client.try_vote(&voter, &pid, &VoteDirection::For, &100);
         mint(&env, &token_id, &voter, 100);
         let result = client.try_vote(&voter, &pid, &true, &100);
         assert!(matches!(result, Err(Ok(GovernorError::VotingClosed))));
@@ -1288,13 +1317,13 @@ mod tests {
             &String::from_str(&env, "P"),
             &String::from_str(&env, "D"),
         );
-        client.vote(&voter, &pid, &true, &200); // meets quorum
+        client.vote(&voter, &pid, &VoteDirection::For, &200); // meets quorum
 
         env.ledger().with_mut(|l| l.timestamp = 5000);
         let state = client.finalize(&pid);
         assert_eq!(state, ProposalState::Passed);
 
-        let result = client.try_vote(&late_voter, &pid, &true, &100);
+        let result = client.try_vote(&late_voter, &pid, &VoteDirection::For, &100);
         assert!(matches!(result, Err(Ok(GovernorError::VotingClosed))));
     }
 
@@ -1321,7 +1350,7 @@ mod tests {
         let state = client.finalize(&pid);
         assert_eq!(state, ProposalState::Failed);
 
-        let result = client.try_vote(&late_voter, &pid, &true, &100);
+        let result = client.try_vote(&late_voter, &pid, &VoteDirection::For, &100);
         assert!(matches!(result, Err(Ok(GovernorError::VotingClosed))));
     }
 
@@ -1342,7 +1371,7 @@ mod tests {
             &String::from_str(&env, "P"),
             &String::from_str(&env, "D"),
         );
-        client.vote(&voter, &pid, &true, &200);
+        client.vote(&voter, &pid, &VoteDirection::For, &200);
         env.ledger().with_mut(|l| l.timestamp = 5000);
         client.finalize(&pid);
 
@@ -1373,7 +1402,7 @@ mod tests {
             &String::from_str(&env, "P"),
             &String::from_str(&env, "D"),
         );
-        client.vote(&voter, &pid, &true, &200);
+        client.vote(&voter, &pid, &VoteDirection::For, &200);
         env.ledger().with_mut(|l| l.timestamp = 5000);
         client.finalize(&pid);
 
@@ -1415,7 +1444,7 @@ mod tests {
         assert!(!client.has_voted(&pid, &voter));
 
         // Cast vote
-        client.vote(&voter, &pid, &true, &100);
+        client.vote(&voter, &pid, &VoteDirection::For, &100);
 
         // Now voter has voted
         assert!(client.has_voted(&pid, &voter));
@@ -1443,7 +1472,7 @@ mod tests {
         assert!(!client.has_voted(&pid, &non_voter));
 
         // voter votes
-        client.vote(&voter, &pid, &true, &100);
+        client.vote(&voter, &pid, &VoteDirection::For, &100);
 
         // non_voter still has not voted
         assert!(!client.has_voted(&pid, &non_voter));
@@ -1521,7 +1550,7 @@ mod tests {
             &String::from_str(&env, "P0"),
             &String::from_str(&env, "D"),
         );
-        client.vote(&voter, &pid0, &true, &200);
+        client.vote(&voter, &pid0, &VoteDirection::For, &200);
 
         // pid1: will remain active but its voting window also expires at t=5000
         let _pid1 = client.propose(
@@ -1581,7 +1610,7 @@ mod tests {
             &String::from_str(&env, "P0"),
             &String::from_str(&env, "D"),
         );
-        client.vote(&voter, &pid0, &true, &200);
+        client.vote(&voter, &pid0, &VoteDirection::For, &200);
 
         env.ledger().with_mut(|l| l.timestamp = 5000);
         client.finalize(&pid0);
@@ -1631,8 +1660,8 @@ mod tests {
         );
 
         // Cast equal weight on both sides — total = 200, meets quorum of 100
-        client.vote(&yes_voter, &pid, &true, &100);
-        client.vote(&no_voter, &pid, &false, &100);
+        client.vote(&yes_voter, &pid, &VoteDirection::For, &100);
+        client.vote(&no_voter, &pid, &VoteDirection::Against, &100);
 
         // Advance past the voting period
         env.ledger().with_mut(|l| l.timestamp = 5000);
@@ -1675,8 +1704,8 @@ mod tests {
         );
 
         // 100 yes, 101 no — quorum met, but no majority
-        client.vote(&yes_voter, &pid, &true, &100);
-        client.vote(&no_voter, &pid, &false, &101);
+        client.vote(&yes_voter, &pid, &VoteDirection::For, &100);
+        client.vote(&no_voter, &pid, &VoteDirection::Against, &101);
 
         env.ledger().with_mut(|l| l.timestamp = 5000);
         let state = client.finalize(&pid);
@@ -1702,8 +1731,8 @@ mod tests {
         );
 
         // 101 yes, 100 no — quorum met, strict majority achieved
-        client.vote(&yes_voter, &pid, &true, &101);
-        client.vote(&no_voter, &pid, &false, &100);
+        client.vote(&yes_voter, &pid, &VoteDirection::For, &101);
+        client.vote(&no_voter, &pid, &VoteDirection::Against, &100);
 
         env.ledger().with_mut(|l| l.timestamp = 5000);
         let state = client.finalize(&pid);
@@ -1736,7 +1765,7 @@ mod tests {
         // Vote on the first 5 before voting period ends (vote_end = 3600)
         for i in 0..5u32 {
             let pid = ids.get(i).unwrap();
-            client.vote(&voter, &pid, &true, &200);
+            client.vote(&voter, &pid, &VoteDirection::For, &200);
         }
 
         // Finalize the first 5 after voting period ends
@@ -1823,7 +1852,7 @@ mod tests {
             &String::from_str(&env, "State Test"),
             &String::from_str(&env, "desc"),
         );
-        client.vote(&voter, &pid, &true, &200);
+        client.vote(&voter, &pid, &VoteDirection::For, &200);
 
         env.ledger().with_mut(|l| l.timestamp = 5000);
         client.finalize(&pid);
@@ -1891,8 +1920,8 @@ mod tests {
 
         let voter_a = Address::generate(&env);
         let voter_b = Address::generate(&env);
-        client.vote(&voter_a, &pid, &true, &300);
-        client.vote(&voter_b, &pid, &false, &100);
+        client.vote(&voter_a, &pid, &VoteDirection::For, &300);
+        client.vote(&voter_b, &pid, &VoteDirection::Against, &100);
 
         let tally = client.get_vote_tally(&pid);
         assert_eq!(tally.yes_votes, 300);
@@ -1945,7 +1974,7 @@ mod tests {
             &String::from_str(&env, "Test"),
             &String::from_str(&env, "Desc"),
         );
-        client.vote(&voter, &pid, &true, &200);
+        client.vote(&voter, &pid, &VoteDirection::For, &200);
 
         let events = env.events().all();
         assert!(
@@ -1969,7 +1998,7 @@ mod tests {
             &String::from_str(&env, "Test"),
             &String::from_str(&env, "Desc"),
         );
-        client.vote(&voter, &pid, &true, &200);
+        client.vote(&voter, &pid, &VoteDirection::For, &200);
 
         env.ledger().with_mut(|l| l.timestamp = 5000);
         client.finalize(&pid);
@@ -1997,7 +2026,7 @@ mod tests {
             &String::from_str(&env, "Test"),
             &String::from_str(&env, "Desc"),
         );
-        client.vote(&voter, &pid, &true, &200);
+        client.vote(&voter, &pid, &VoteDirection::For, &200);
 
         env.ledger().with_mut(|l| l.timestamp = 5000);
         client.finalize(&pid);
@@ -2241,5 +2270,117 @@ mod tests {
             1,
             "initialized contract count should still be 1"
         );
+    }
+
+    // ── Abstain vote tests ─────────────────────────────────────────────────────
+
+    /// Abstain votes count toward quorum but not for or against.
+    #[test]
+    fn test_abstain_counts_toward_quorum() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        let client = setup(&env); // quorum = 100
+
+        let proposer = Address::generate(&env);
+        let yes_voter = Address::generate(&env);
+        let abstain_voter = Address::generate(&env);
+
+        let pid = client.propose(
+            &proposer,
+            &String::from_str(&env, "Abstain Quorum Test"),
+            &String::from_str(&env, "desc"),
+        );
+
+        // 60 for + 40 abstain = 100 total, meets quorum; 60 > 0 so passes
+        client.vote(&yes_voter, &pid, &VoteDirection::For, &60);
+        client.vote(&abstain_voter, &pid, &VoteDirection::Abstain, &40);
+
+        env.ledger().with_mut(|l| l.timestamp = 5000);
+        let state = client.finalize(&pid);
+        assert_eq!(state, ProposalState::Passed);
+
+        let proposal = client.get_proposal(&pid);
+        assert_eq!(proposal.votes_for, 60);
+        assert_eq!(proposal.votes_against, 0);
+        assert_eq!(proposal.abstentions, 40);
+    }
+
+    /// Abstain-only votes meet quorum but proposal fails (no majority for).
+    #[test]
+    fn test_abstain_only_meets_quorum_but_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        let client = setup(&env); // quorum = 100
+
+        let proposer = Address::generate(&env);
+        let abstain_voter = Address::generate(&env);
+
+        let pid = client.propose(
+            &proposer,
+            &String::from_str(&env, "Abstain Only"),
+            &String::from_str(&env, "desc"),
+        );
+
+        client.vote(&abstain_voter, &pid, &VoteDirection::Abstain, &200);
+
+        env.ledger().with_mut(|l| l.timestamp = 5000);
+        let state = client.finalize(&pid);
+        // quorum met (200 >= 100) but votes_for (0) not > votes_against (0)
+        assert_eq!(state, ProposalState::Failed);
+    }
+
+    /// Abstain votes without enough total to meet quorum still fail.
+    #[test]
+    fn test_abstain_below_quorum_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        let client = setup(&env); // quorum = 100
+
+        let proposer = Address::generate(&env);
+        let abstain_voter = Address::generate(&env);
+
+        let pid = client.propose(
+            &proposer,
+            &String::from_str(&env, "Abstain Below Quorum"),
+            &String::from_str(&env, "desc"),
+        );
+
+        client.vote(&abstain_voter, &pid, &VoteDirection::Abstain, &50);
+
+        env.ledger().with_mut(|l| l.timestamp = 5000);
+        let state = client.finalize(&pid);
+        assert_eq!(state, ProposalState::Failed);
+    }
+
+    /// get_vote_tally reflects abstain votes correctly.
+    #[test]
+    fn test_get_vote_tally_with_abstain() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        let client = setup(&env);
+
+        let proposer = Address::generate(&env);
+        let pid = client.propose(
+            &proposer,
+            &String::from_str(&env, "Tally Abstain"),
+            &String::from_str(&env, "desc"),
+        );
+
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        let v3 = Address::generate(&env);
+        client.vote(&v1, &pid, &VoteDirection::For, &100);
+        client.vote(&v2, &pid, &VoteDirection::Against, &50);
+        client.vote(&v3, &pid, &VoteDirection::Abstain, &75);
+
+        let tally = client.get_vote_tally(&pid);
+        assert_eq!(tally.yes_votes, 100);
+        assert_eq!(tally.no_votes, 50);
+        assert_eq!(tally.abstain_votes, 75);
+        assert_eq!(tally.total_votes, 225);
     }
 }
