@@ -750,6 +750,17 @@ mod tests {
     }
 
     #[test]
+    fn test_get_timelock_delay_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, MultisigContract);
+        let client = MultisigContractClient::new(&env, &contract_id);
+        let o1 = Address::generate(&env);
+        client.initialize(&vec![&env, o1], &1, &0);
+        assert_eq!(client.get_timelock_delay(), 0);
+    }
+
+    #[test]
     fn test_initialize_with_duplicate_owners() {
         let env = Env::default();
         env.mock_all_auths();
