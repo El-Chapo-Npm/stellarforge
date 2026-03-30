@@ -67,6 +67,9 @@ pub struct StreamStatus {
     pub is_active: bool,
     pub is_finished: bool,
     pub is_paused: bool,
+    /// `true` when `withdrawable > 0`. A finished stream can be claimable
+    /// even though `is_active` is `false`.
+    pub is_claimable: bool,
 }
 
 #[contracterror]
@@ -535,16 +538,22 @@ impl ForgeStream {
     /// - `withdrawn`: Cumulative withdrawn
     /// - `withdrawable`: streamed - withdrawn
     /// - `remaining`: total - streamed
-    /// - `is_active`: !cancelled && now < end_time
+    /// - `is_active`: !cancelled && !paused && now < end_time
     /// - `is_finished`: now >= end_time
+    /// - `is_claimable`: withdrawable > 0
+    ///
+    /// **Note:** `is_active = false` does **not** imply `withdrawable = 0`.
+    /// A finished stream (`is_finished = true`) may still have tokens available
+    /// to withdraw. Always check `is_claimable` or `withdrawable` directly
+    /// before assuming nothing can be claimed.
     ///
     /// # Example
     /// ```rust,ignore
     /// let status = forge_stream.get_stream_status(env, stream_id)?;
-    /// if status.withdrawable > 0 {
+    /// if status.is_claimable {
     ///     forge_stream.withdraw(env, stream_id)?;
     /// }
-    /// ```rust,ignore
+    /// ```
     pub fn get_stream_status(env: Env, stream_id: u64) -> Result<StreamStatus, StreamError> {
         Self::validate_stream_id(&env, stream_id)?;
         let stream: Stream = env
@@ -572,6 +581,7 @@ impl ForgeStream {
             is_active,
             is_finished,
             is_paused: stream.is_paused,
+            is_claimable: withdrawable > 0,
         })
     }
 
@@ -1126,6 +1136,36 @@ mod tests {
         assert!(status.is_finished);
         assert!(!status.is_active);
         assert_eq!(status.streamed, 100_000);
+    }
+
+    #[test]
+    fn test_finished_stream_is_claimable_before_withdrawal() {
+        // A finished stream must have is_active=false, is_finished=true,
+        // is_claimable=true, and withdrawable == total streamed.
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ForgeStream);
+        let client = ForgeStreamClient::new(&env, &contract_id);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token_id).mint(&sender, &100_000i128);
+
+        // rate=100, duration=1000 → total=100_000
+        let stream_id =
+            client.create_stream(&sender, &token_id, &recipient, &100, &1000);
+        // Advance past end_time without withdrawing
+        env.ledger().with_mut(|l| l.timestamp += 2000);
+
+        let status = client.get_stream_status(&stream_id);
+        assert!(!status.is_active);
+        assert!(status.is_finished);
+        assert!(status.is_claimable);
+        assert_eq!(status.withdrawable, 100_000);
     }
 
     // ── Rounding / cancellation split tests ──────────────────────────────────
