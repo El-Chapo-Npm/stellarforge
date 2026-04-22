@@ -1214,6 +1214,7 @@ mod tests {
     #[test]
     fn test_pause_stream_emits_event() {
         use soroban_sdk::testutils::Events;
+        use soroban_sdk::TryFromVal;
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, ForgeStream);
@@ -1231,8 +1232,8 @@ mod tests {
         let found = events.iter().any(|(_, topics, data)| {
             topics
                 .get(0)
-                .and_then(|t| soroban_sdk::Symbol::try_from_val(&env, &t).ok())
-                .map(|s| s == soroban_sdk::Symbol::new(&env, "stream_paused"))
+                .and_then(|t| Symbol::try_from_val(&env, &t).ok())
+                .map(|s| s == Symbol::new(&env, "stream_paused"))
                 .unwrap_or(false)
                 && <u64>::try_from_val(&env, &data)
                     .map(|id| id == stream_id)
@@ -1246,6 +1247,7 @@ mod tests {
     #[test]
     fn test_resume_stream_emits_event() {
         use soroban_sdk::testutils::Events;
+        use soroban_sdk::TryFromVal;
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, ForgeStream);
@@ -1265,8 +1267,8 @@ mod tests {
         let found = events.iter().any(|(_, topics, data)| {
             topics
                 .get(0)
-                .and_then(|t| soroban_sdk::Symbol::try_from_val(&env, &t).ok())
-                .map(|s| s == soroban_sdk::Symbol::new(&env, "stream_resumed"))
+                .and_then(|t| Symbol::try_from_val(&env, &t).ok())
+                .map(|s| s == Symbol::new(&env, "stream_resumed"))
                 .unwrap_or(false)
                 && <u64>::try_from_val(&env, &data)
                     .map(|id| id == stream_id)
@@ -1280,6 +1282,7 @@ mod tests {
     #[test]
     fn test_no_pause_event_on_failed_pause() {
         use soroban_sdk::testutils::Events;
+        use soroban_sdk::TryFromVal;
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, ForgeStream);
@@ -1300,8 +1303,8 @@ mod tests {
         let pause_event_count = events.iter().filter(|(_, topics, _)| {
             topics
                 .get(0)
-                .and_then(|t| soroban_sdk::Symbol::try_from_val(&env, &t).ok())
-                .map(|s| s == soroban_sdk::Symbol::new(&env, "stream_paused"))
+                .and_then(|t| Symbol::try_from_val(&env, &t).ok())
+                .map(|s| s == Symbol::new(&env, "stream_paused"))
                 .unwrap_or(false)
         }).count();
         assert_eq!(pause_event_count, 1, "Expected exactly 1 stream_paused event, got {pause_event_count}");
