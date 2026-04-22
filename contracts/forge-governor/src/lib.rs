@@ -883,6 +883,86 @@ mod tests {
         assert_eq!(proposal.state, ProposalState::Executed);
     }
 
+    /// finalize() must store the exact ledger timestamp in passed_at, and
+    /// execute() must use that value for the timelock boundary check.
+    ///
+    /// Timeline (timelock_delay = 86400):
+    ///   t=0      propose
+    ///   t=0      vote (200 weight, quorum=100)
+    ///   t=5000   finalize → passed_at must equal 5000
+    ///   t=5000+86399  execute → TimelockNotElapsed (one second short)
+    ///   t=5000+86400  execute → Ok(())
+    ///
+    /// Also verifies that a Failed proposal stores passed_at = None.
+    #[test]
+    fn test_finalize_sets_passed_at_and_execute_respects_timelock() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        let client = setup(&env);
+
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+        let executor = Address::generate(&env);
+
+        // ── Passed proposal ──────────────────────────────────────────────────
+        let pid = client.propose(
+            &proposer,
+            &String::from_str(&env, "P"),
+            &String::from_str(&env, "D"),
+        );
+        client.vote(&voter, &pid, &true, &200);
+
+        // Finalize at a known timestamp
+        let finalize_time: u64 = 5000;
+        env.ledger().with_mut(|l| l.timestamp = finalize_time);
+        let state = client.finalize(&pid);
+        assert_eq!(state, ProposalState::Passed);
+
+        // passed_at must be exactly the finalize timestamp
+        let proposal = client.get_proposal(&pid);
+        assert_eq!(
+            proposal.passed_at,
+            Some(finalize_time),
+            "passed_at should equal the ledger timestamp at finalize time"
+        );
+
+        // One second before timelock expires → must revert
+        env.ledger()
+            .with_mut(|l| l.timestamp = finalize_time + 86400 - 1);
+        let result = client.try_execute(&executor, &pid);
+        assert_eq!(
+            result,
+            Err(Ok(GovernorError::TimelockNotElapsed)),
+            "execute should revert at passed_at + timelock_delay - 1"
+        );
+
+        // Exactly at timelock boundary → must succeed
+        env.ledger()
+            .with_mut(|l| l.timestamp = finalize_time + 86400);
+        client.execute(&executor, &pid);
+        let proposal = client.get_proposal(&pid);
+        assert_eq!(proposal.state, ProposalState::Executed);
+
+        // ── Failed proposal ───────────────────────────────────────────────────
+        let pid2 = client.propose(
+            &proposer,
+            &String::from_str(&env, "Fail"),
+            &String::from_str(&env, "No votes"),
+        );
+        // No votes — quorum not met → Failed
+        env.ledger().with_mut(|l| l.timestamp = finalize_time + 86400 + 5000);
+        let state2 = client.finalize(&pid2);
+        assert_eq!(state2, ProposalState::Failed);
+
+        let failed_proposal = client.get_proposal(&pid2);
+        assert_eq!(
+            failed_proposal.passed_at,
+            None,
+            "passed_at must be None for a Failed proposal"
+        );
+    }
+
     #[test]
     fn test_has_voted_returns_true_for_voter() {
         let env = Env::default();
